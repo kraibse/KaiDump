@@ -21,11 +21,12 @@ jobs:
 
       - name: Install devkitPro packages
         run: |
-          pkgs="switch-dev switch-sdl2 switch-sdl2_ttf switch-libjpeg-turbo"
-          # pkg.devkitpro.org rejects CI downloads (HTTP 403); the
+          pkgs="switch-sdl2 switch-sdl2_ttf switch-libjpeg-turbo"
+          # pkg.devkitpro.org often answers CI syncs with HTTP 403; the
           # devkita64 image already ships these, so only sync if missing.
-          if ! dkp-pacman -Q $pkgs; then
-            dkp-pacman -Sy --needed --noconfirm $pkgs
+          # switch-dev is a package group, so it is queried with -Qg.
+          if ! dkp-pacman -Qg switch-dev >/dev/null || ! dkp-pacman -Q $pkgs; then
+            dkp-pacman -Sy --needed --noconfirm switch-dev $pkgs
           fi
 
       - name: Install ounce-devkit
