@@ -1462,13 +1462,24 @@ static Result mount_native_title_romfs(u64 application_id,
         &filesystem, runtime_program_id, (FsFileSystemType)1);
     log_line("romfs-native-open-patch runtime=%016llX result=0x%08x",
              (unsigned long long)runtime_program_id, result);
-    if (R_FAILED(result) && selected == update) {
-        /* The fallbacks below open the selected Program on its own. For an
-           update that is only the delta on top of the base: it can mount,
-           but every file that comes from the base fails to read. */
-        log_line("romfs-native-skip-update-only reason=update-romfs-needs-base");
-        end_native_romfs_context();
-        return result;
+    if (R_FAILED(result) && selected == update && base) {
+        /* The fallbacks below open the selected Program on its own. When the
+           base has this Program too, the update's is only the delta on top
+           of it: it can mount, but every file that comes from the base fails
+           to read. A Program the update adds (a Switch 2 Edition's native
+           program) is complete, so it may still be opened alone. */
+        u8 base_programs[8] = {0};
+        const s32 base_count = list_program_indices(base, base_programs, 8);
+        bool base_has_program = false;
+        for (s32 i = 0; i < base_count; ++i)
+            if (base_programs[i] == program_index) base_has_program = true;
+        log_line("romfs-native-update-program index=%u base-has-program=%u",
+                 program_index, base_has_program);
+        if (base_has_program) {
+            log_line("romfs-native-skip-update-only reason=update-romfs-needs-base");
+            end_native_romfs_context();
+            return result;
+        }
     }
     if (R_FAILED(result)) {
         result = fsOpenFileSystemWithId(
