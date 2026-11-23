@@ -37,7 +37,7 @@ OBJECTS     := $(SOURCES:%.c=$(BUILD)/%.o)
 
 APP_TITLE   := KaiDump
 APP_AUTHOR  := TomDom
-APP_VERSION := 1.0.6
+APP_VERSION := 1.0.7
 
 all: $(TARGET).nro
 
