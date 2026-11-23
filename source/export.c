@@ -376,10 +376,22 @@ static void ftp_status(void *user, const char *status, uint64_t transferred,
 
 static size_t build_nup_inputs(NupInput *inputs, size_t capacity) {
     Application *app = &g.applications[g.selected];
+    /* NUP SPEC §3.1.2 allows one base package per container. Game already
+       contains the base, so a NUP skips a separately selected Base game;
+       extracted and TAR output keep both in game/ and base/. */
+    bool game_selected = false;
+    for (s32 i = 0; i < g.choice_count; ++i)
+        if (g.choices[i].selected && g.choices[i].kind == CONTENT_GAME)
+            game_selected = true;
     size_t count = 0;
     for (s32 i = 0; i < g.choice_count && count < capacity; ++i) {
         ContentChoice *choice = &g.choices[i];
         if (!choice->selected) continue;
+        if (choice->kind == CONTENT_BASE && game_selected &&
+            g.output_format == OUTPUT_NUP) {
+            log_line("nup-input-skip-base reason=game-selected");
+            continue;
+        }
         NsApplicationContentMetaStatus *meta = &g.meta[choice->meta_index];
         NupInput *input = &inputs[count];
         memset(input, 0, sizeof(*input));
