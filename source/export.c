@@ -66,7 +66,9 @@ static Result mount_nup_exefs_status(
 }
 
 static Result mount_nup_combined_exefs(
-    const ContentChoice *choice, NupMountContext *context) {
+    const ContentChoice *choice, NupMountContext *context,
+    bool *exefs_base_only) {
+    *exefs_base_only = false;
     Application *app = &g.applications[g.selected];
     s32 index = choice->update_index >= 0
         ? choice->update_index : choice->meta_index;
@@ -81,13 +83,18 @@ static Result mount_nup_combined_exefs(
                  result);
         result = mount_nup_exefs_status(
             original, NULL, app->record.application_id, context);
-        if (R_SUCCEEDED(result)) g.exefs_base_only = true;
+        if (R_SUCCEEDED(result)) {
+            g.exefs_base_only = true;
+            *exefs_base_only = true;
+        }
     }
     return result;
 }
 
 static Result mount_nup_romfs_status(
-    const NsApplicationContentMetaStatus *status, NupMountContext *context) {
+    const NsApplicationContentMetaStatus *status, NupMountContext *context,
+    const NsApplicationContentMetaStatus **merged_update) {
+    *merged_update = NULL;
     bool addon = status->meta_type == NcmContentMetaType_AddOnContent ||
                  status->meta_type == NcmContentMetaType_DataPatch;
     u8 content_type = addon ? NcmContentType_Data : NcmContentType_Program;
@@ -99,6 +106,26 @@ static Result mount_nup_romfs_status(
     if (R_FAILED(result)) return result;
 
     FsStorage storage = {0};
+    const NsApplicationContentMetaStatus *update = find_dlc_update(status);
+    if (update) {
+        result = open_patched_addon_storage(status, update, &storage);
+        if (R_SUCCEEDED(result)) {
+            Result mount_result = romfsMountFromStorage(storage, 0, "kdnrom");
+            log_line("nup-romfs-mount-dlc-update id=%016llX version=%u result=0x%08x",
+                     (unsigned long long)status->application_id,
+                     update->version, mount_result);
+            if (R_SUCCEEDED(mount_result)) {
+                context->romfs_active = true;
+                context->romfs_device = true;
+                *merged_update = update;
+                return 0;
+            }
+            fsStorageClose(&storage);
+            storage = (FsStorage){0};
+        }
+        log_line("dlc-update-warning not-included: the DLC update could not be merged; exporting the DLC without it");
+        g.dlc_update_missing = true;
+    }
     if (addon) {
         result = fsOpenDataStorageByDataId(
             &storage, status->application_id,
@@ -272,14 +299,24 @@ static Result mount_nup_source(const NupInput *input, NupMount *mount,
         set_program_index_override(
             input->program_index == PROGRAM_INDEX_AUTO
                 ? -1 : input->program_index);
-        result = mount_nup_combined_exefs(choice, context);
+        bool exefs_base_only = false;
+        result = mount_nup_combined_exefs(choice, context, &exefs_base_only);
         if (R_SUCCEEDED(result)) {
             const bool was_base_only = g.romfs_base_only;
             g.romfs_base_only = false;
             bool romfs_device = false;
-            result = mount_title_romfs(
-                g.applications[g.selected].record.application_id,
-                &romfs_device);
+            const u64 application_id =
+                g.applications[g.selected].record.application_id;
+            if (exefs_base_only) {
+                /* The update's RomFS would not match the base ExeFS. */
+                log_line("romfs-warning base-only: the update ExeFS is unavailable; using the base RomFS to match");
+                result = mount_base_title_romfs(application_id,
+                                                &romfs_device);
+                g.romfs_base_only = true;
+                base_only = true;
+            } else {
+                result = mount_title_romfs(application_id, &romfs_device);
+            }
             const bool romfs_base_only = g.romfs_base_only;
             g.romfs_base_only = was_base_only || romfs_base_only;
             if (R_SUCCEEDED(result)) {
@@ -288,7 +325,7 @@ static Result mount_nup_source(const NupInput *input, NupMount *mount,
                 context->romfs_combined_name = true;
                 snprintf(mount->romfs, sizeof(mount->romfs), "kdrom:/");
             }
-            if (R_SUCCEEDED(result) && romfs_base_only &&
+            if (R_SUCCEEDED(result) && romfs_base_only && !exefs_base_only &&
                 choice->update_index >= 0) {
                 /* Base RomFS with the update's ExeFS would be a mismatched
                    game, so export the base version consistently. */
@@ -309,14 +346,25 @@ static Result mount_nup_source(const NupInput *input, NupMount *mount,
                 status, NULL,
                 g.applications[g.selected].record.application_id, context);
         }
+        const NsApplicationContentMetaStatus *merged_update = NULL;
         if (R_SUCCEEDED(result))
-            result = mount_nup_romfs_status(status, context);
+            result = mount_nup_romfs_status(status, context, &merged_update);
         if (R_SUCCEEDED(result))
             snprintf(mount->romfs, sizeof(mount->romfs), "kdnrom:/");
+        if (R_SUCCEEDED(result) && merged_update) {
+            /* The package is the DLC as updated. */
+            mount->version = merged_update->version;
+            mount->version_set = true;
+        }
     }
     if (R_SUCCEEDED(result) && context->exefs_active)
         snprintf(mount->exefs, sizeof(mount->exefs), "kdnexe:/");
     if (R_SUCCEEDED(result)) attach_nup_meta(input, choice, base_only, mount);
+    if (R_SUCCEEDED(result) && base_only && choice->update_index >= 0) {
+        /* The package holds the base game, not the update's version. */
+        mount->version = g.meta[choice->meta_index].version;
+        mount->version_set = true;
+    }
     if (R_FAILED(result)) unmount_nup_source(context);
     log_line("nup-source-mount choice=%u kind=%u id=%016llX result=0x%08x exefs=%s romfs=%s",
              input->source_id, choice->kind,
@@ -885,6 +933,7 @@ void dump_title(PadState *pad) {
     g_ftp_stop_requested = false;
     g.exefs_base_only = false;
     g.romfs_self_matched = false;
+    g.dlc_update_missing = false;
 
     log_line("export-start title=%016llX name=%s mode=%s destination=%s choices=%d selected=%d",
              (unsigned long long)app->record.application_id,
@@ -1018,6 +1067,9 @@ void dump_title(PadState *pad) {
         else if (g.exefs_base_only)
             snprintf(g.status, sizeof(g.status),
                      "Warning: the update's ExeFS was unavailable, so the base ExeFS was used (see KaiDump.log)");
+        else if (g.dlc_update_missing)
+            snprintf(g.status, sizeof(g.status),
+                     "Warning: a DLC update could not be merged, so that DLC was exported without it (see KaiDump.log)");
     } else if (R_MODULE(g.dump_result) == Module_Libnx &&
                R_DESCRIPTION(g.dump_result) == KAIDUMP_ERROR_CANCELED) {
         snprintf(g.status, sizeof(g.status),

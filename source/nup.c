@@ -657,6 +657,8 @@ static Result scan_sources(Plan *plan, const NupInput *inputs,
 
         NupMount view = {0};
         result = mount(&plan->inputs[i], &view, mount_user);
+        if (R_SUCCEEDED(result) && view.version_set)
+            package->version = view.version;
         if (R_SUCCEEDED(result) && view.exefs[0]) {
             result = scan_directory(plan, view.exefs, "exefs", (uint32_t)i,
                                     cancelled, cancel_user,

@@ -897,6 +897,21 @@ Result mount_title_romfs(u64 application_id, bool *romfs_device) {
     return prefer_romfs_failure(result, self_result);
 }
 
+Result mount_base_title_romfs(u64 application_id, bool *romfs_device) {
+    /* The explicit route only reaches the application's first Program. */
+    if (g_program_index_override > 0) {
+        log_line("romfs-base-unavailable index=%d reason=explicit-route-first-program-only",
+                 g_program_index_override);
+        return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+    }
+    *romfs_device = false;
+    Result result = mount_explicit_program_content(application_id,
+                                                   romfs_device);
+    log_line("romfs-base-title title=%016llX result=0x%08x",
+             (unsigned long long)application_id, result);
+    return result;
+}
+
 /* ExeFS ------------------------------------------------------------------ */
 
 static Result open_code_filesystem(FsFileSystem *out, u64 program_id,
@@ -1051,13 +1066,153 @@ static Result resolve_installed_content_info(
         runtime_program_id, runtime_program_index);
 }
 
+/* The installed status of this type with the highest version. NS can list
+   an update that is no longer installed (no storage), and the console runs
+   the newest installed one, so the choice rows (build_content_choices) and
+   every export route use this same entry. */
 const NsApplicationContentMetaStatus *find_program_status(u8 meta_type) {
+    const NsApplicationContentMetaStatus *found = NULL;
     for (s32 i = 0; i < g.meta_count; ++i) {
-        if (g.meta[i].meta_type == meta_type &&
-            g.meta[i].storageID != NcmStorageId_None)
-            return &g.meta[i];
+        if (g.meta[i].meta_type != meta_type ||
+            g.meta[i].storageID == NcmStorageId_None)
+            continue;
+        if (!found || g.meta[i].version > found->version)
+            found = &g.meta[i];
     }
-    return NULL;
+    return found;
+}
+
+/* DLC updates ------------------------------------------------------------ */
+
+/* The installed DLC update (DataPatch) of a DLC, newest version. Its id is
+   the DLC's + 0x800 (e.g. 010015100B515001 -> 010015100B515801). */
+const NsApplicationContentMetaStatus *find_dlc_update(
+    const NsApplicationContentMetaStatus *dlc) {
+    if (!dlc || dlc->meta_type != NcmContentMetaType_AddOnContent)
+        return NULL;
+    const NsApplicationContentMetaStatus *found = NULL;
+    for (s32 i = 0; i < g.meta_count; ++i) {
+        const NsApplicationContentMetaStatus *status = &g.meta[i];
+        if (status->meta_type != NcmContentMetaType_DataPatch ||
+            status->storageID == NcmStorageId_None ||
+            status->application_id != dlc->application_id + 0x800)
+            continue;
+        if (!found || status->version > found->version) found = status;
+    }
+    return found;
+}
+
+/* Read-only diagnostic: the DLC paths registered in the add-on content
+   location resolver (lr 3). Since 15.0.0 it can hold a second path per DLC
+   (GetRegisteredAddOnContentPaths, 5), which is where a DLC update is
+   paired with its DLC. Nothing is registered or changed here. */
+static void log_registered_addon_paths(u64 data_id) {
+    Result result = lrInitialize();
+    if (R_FAILED(result)) {
+        log_result("dlc-update-lr-initialize", result);
+        return;
+    }
+    Service resolver = {0};
+    result = serviceDispatch(lrGetServiceSession(), 3,
+        .out_num_objects = 1,
+        .out_objects = &resolver,
+    );
+    if (R_SUCCEEDED(result)) {
+        char path[0x300] = {0};
+        char other[0x300] = {0};
+        result = serviceDispatchIn(&resolver, 5, data_id,
+            .buffer_attrs = {
+                SfBufferAttr_HipcMapAlias | SfBufferAttr_Out,
+                SfBufferAttr_HipcMapAlias | SfBufferAttr_Out,
+            },
+            .buffers = {{path, sizeof(path)}, {other, sizeof(other)}},
+        );
+        path[sizeof(path) - 1] = 0;
+        other[sizeof(other) - 1] = 0;
+        log_line("dlc-update-lr-registered dlc=%016llX result=0x%08x path=%s other=%s",
+                 (unsigned long long)data_id, result,
+                 R_SUCCEEDED(result) && path[0] ? path : "(none)",
+                 R_SUCCEEDED(result) && other[0] ? other : "(none)");
+        serviceClose(&resolver);
+    } else {
+        log_result("dlc-update-lr-open-addon", result);
+    }
+    lrExit();
+}
+
+static s64 storage_size(FsStorage *storage) {
+    s64 size = -1;
+    if (R_FAILED(fsStorageGetSize(storage, &size))) size = -1;
+    return size;
+}
+
+Result open_patched_addon_storage(const NsApplicationContentMetaStatus *dlc,
+                                  const NsApplicationContentMetaStatus *patch,
+                                  FsStorage *out) {
+    char patch_path[FS_MAX_PATH] = {0};
+    FsContentAttributes patch_attributes = 0;
+    /* Also prepares the update's license when it needs one. */
+    Result result = resolve_installed_content(
+        patch, NcmContentType_Data, patch_path, sizeof(patch_path),
+        &patch_attributes);
+    log_line("dlc-update-resolve dlc=%016llX update=%016llX version=%u storage=%u result=0x%08x path=%s",
+             (unsigned long long)dlc->application_id,
+             (unsigned long long)patch->application_id, patch->version,
+             patch->storageID, result,
+             R_SUCCEEDED(result) ? patch_path : "(unavailable)");
+    if (R_FAILED(result)) return result;
+    log_registered_addon_paths(dlc->application_id);
+
+    /* A DLC update is a delta on top of its DLC, like a game update. Opened
+       on its own it reports the size of the updated DLC, but reads of data
+       that comes from the DLC fail. A storage of exactly that size, opened
+       by DLC id, is the merged DLC; the size of the plain DLC means FS
+       ignored the update. */
+    s64 base_size = -1;
+    s64 patch_size = -1;
+    FsStorage probe = {0};
+    Result base_result = fsOpenDataStorageByDataId(
+        &probe, dlc->application_id, (NcmStorageId)dlc->storageID);
+    if (R_SUCCEEDED(base_result)) {
+        base_size = storage_size(&probe);
+        fsStorageClose(&probe);
+    }
+    Result patch_result = open_data_storage_by_path(
+        &probe, patch_path, patch_attributes, FsFileSystemType_ContentData);
+    if (R_SUCCEEDED(patch_result)) {
+        patch_size = storage_size(&probe);
+        fsStorageClose(&probe);
+    }
+    log_line("dlc-update-sizes dlc=%016llX base-result=0x%08x base=%lld update-result=0x%08x updated=%lld",
+             (unsigned long long)dlc->application_id, base_result,
+             (long long)base_size, patch_result, (long long)patch_size);
+    if (patch_size < 0 || patch_size == base_size) {
+        /* Without a distinct updated size a merged DLC cannot be told
+           apart from the plain one, so do not claim one. */
+        log_line("dlc-update-unverifiable dlc=%016llX",
+                 (unsigned long long)dlc->application_id);
+        return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+    }
+
+    /* With no explicit storage FS resolves the DLC through the add-on
+       content location resolver, where the update can be paired. */
+    const u8 storages[] = {NcmStorageId_Any, NcmStorageId_None};
+    for (size_t i = 0; i < sizeof(storages); ++i) {
+        FsStorage candidate = {0};
+        result = fsOpenDataStorageByDataId(
+            &candidate, dlc->application_id, (NcmStorageId)storages[i]);
+        const s64 size = R_SUCCEEDED(result) ? storage_size(&candidate) : -1;
+        const bool merged = R_SUCCEEDED(result) && size == patch_size;
+        log_line("dlc-update-open dlc=%016llX storage=%u result=0x%08x size=%lld merged=%u",
+                 (unsigned long long)dlc->application_id, storages[i],
+                 result, (long long)size, merged);
+        if (merged) {
+            *out = candidate;
+            return 0;
+        }
+        if (R_SUCCEEDED(result)) fsStorageClose(&candidate);
+    }
+    return MAKERESULT(Module_Libnx, LibnxError_NotFound);
 }
 
 static bool result_is_missing_external_key(Result result) {
@@ -1307,6 +1462,14 @@ static Result mount_native_title_romfs(u64 application_id,
         &filesystem, runtime_program_id, (FsFileSystemType)1);
     log_line("romfs-native-open-patch runtime=%016llX result=0x%08x",
              (unsigned long long)runtime_program_id, result);
+    if (R_FAILED(result) && selected == update) {
+        /* The fallbacks below open the selected Program on its own. For an
+           update that is only the delta on top of the base: it can mount,
+           but every file that comes from the base fails to read. */
+        log_line("romfs-native-skip-update-only reason=update-romfs-needs-base");
+        end_native_romfs_context();
+        return result;
+    }
     if (R_FAILED(result)) {
         result = fsOpenFileSystemWithId(
             &filesystem, runtime_program_id, (FsFileSystemType)1,

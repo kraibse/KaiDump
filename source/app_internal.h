@@ -146,6 +146,8 @@ typedef struct {
     bool romfs_base_only;
     bool exefs_base_only;
     bool romfs_self_matched;
+    /* A selected DLC has an installed update that could not be merged. */
+    bool dlc_update_missing;
 } AppState;
 
 extern AppState g;
@@ -209,11 +211,22 @@ Result resolve_installed_content(
     char *path, size_t path_size, FsContentAttributes *attributes);
 void close_code_filesystem(FsFileSystem *filesystem);
 Result mount_title_romfs(u64 application_id, bool *romfs_device);
+/* The base RomFS without the update (sets g.romfs_base_only when an update
+   is installed), so it matches a base ExeFS. */
+Result mount_base_title_romfs(u64 application_id, bool *romfs_device);
 /* Keeps the more informative of two RomFS open failures (e.g. a missing
    update key over a generic InvalidArgument from a later fallback). */
 Result prefer_romfs_failure(Result kept, Result candidate);
 void unmount_title_romfs(const char *name, bool romfs_device);
 const NsApplicationContentMetaStatus *find_program_status(u8 meta_type);
+/* The installed update (DataPatch) of a DLC, or NULL. */
+const NsApplicationContentMetaStatus *find_dlc_update(
+    const NsApplicationContentMetaStatus *dlc);
+/* The DLC with its update applied, verified by size; fails (and the caller
+   falls back to the plain DLC) when FS does not merge them. */
+Result open_patched_addon_storage(const NsApplicationContentMetaStatus *dlc,
+                                  const NsApplicationContentMetaStatus *patch,
+                                  FsStorage *out);
 /* Programs of titles with more than one (Switch 2 Editions). */
 #define PROGRAM_INDEX_AUTO 0xff
 void set_program_index_override(int program_index);

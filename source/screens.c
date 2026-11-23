@@ -329,6 +329,12 @@ static void draw_details(void) {
             if (choice->kind == CONTENT_GAME && choice->update_index >= 0) {
                 uiDrawText(128, y + 28, 14, COLOR_MUTED,
                            "Base + installed update");
+            } else if (choice->kind == CONTENT_DLC &&
+                       choice->update_index >= 0) {
+                uiDrawTextf(128, y + 28, 14, COLOR_MUTED,
+                            "DLC + update (v%u)  /  %s",
+                            g.meta[choice->update_index].version,
+                            storage_name(meta->storageID));
             } else if (choice->kind == CONTENT_BASE) {
                 uiDrawText(128, y + 28, 14, COLOR_MUTED,
                            "Game card base");

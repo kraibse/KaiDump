@@ -244,6 +244,27 @@ static Result copy_selected_romfs(
     if (R_FAILED(result)) return result;
 
     FsStorage storage = {0};
+    const NsApplicationContentMetaStatus *update = find_dlc_update(status);
+    if (update) {
+        result = open_patched_addon_storage(status, update, &storage);
+        if (R_SUCCEEDED(result)) {
+            log_line("selected-romfs-dlc-update-merged id=%016llX version=%u",
+                     (unsigned long long)status->application_id,
+                     update->version);
+            result = romfsMountFromStorage(storage, 0, "kdrom");
+            log_line("selected-romfs-mount-storage type=%u result=0x%08x",
+                     status->meta_type, result);
+            if (R_SUCCEEDED(result)) {
+                result = copy_tree("kdrom:/", destination, "romfs", pad);
+                romfsUnmount("kdrom");
+                return result;
+            }
+            fsStorageClose(&storage);
+            storage = (FsStorage){0};
+        }
+        log_line("dlc-update-warning not-included: the DLC update could not be merged; exporting the DLC without it");
+        g.dlc_update_missing = true;
+    }
     if (addon) {
         result = fsOpenDataStorageByDataId(
             &storage, status->application_id,
@@ -338,7 +359,7 @@ static Result export_combined_program(u64 application_id,
     g.romfs_base_only = false;
     bool romfs_device = false;
     Result romfs_result = mount_title_romfs(application_id, &romfs_device);
-    const bool romfs_mounted = R_SUCCEEDED(romfs_result);
+    bool romfs_mounted = R_SUCCEEDED(romfs_result);
     const bool romfs_base_only = romfs_mounted && g.romfs_base_only;
     g.romfs_base_only = was_base_only || romfs_base_only;
 
@@ -358,6 +379,18 @@ static Result export_combined_program(u64 application_id,
                  exefs_result);
         exefs_result = open_title_exefs(&exefs, application_id, base, NULL);
         if (R_SUCCEEDED(exefs_result)) g.exefs_base_only = true;
+        if (R_SUCCEEDED(exefs_result) && romfs_mounted) {
+            /* The mounted RomFS includes the update; with the base ExeFS
+               the dump would mix two game versions, so use the base RomFS
+               too. */
+            log_line("romfs-warning base-only: the update ExeFS is unavailable; using the base RomFS to match");
+            unmount_title_romfs("kdrom", romfs_device);
+            romfs_device = false;
+            romfs_result = mount_base_title_romfs(application_id,
+                                                  &romfs_device);
+            romfs_mounted = R_SUCCEEDED(romfs_result);
+            g.romfs_base_only = true;
+        }
     }
     if (R_SUCCEEDED(exefs_result)) {
         snprintf(destination, sizeof(destination), "%s/exefs", package);

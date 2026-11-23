@@ -394,13 +394,26 @@ static void add_content_choice(ContentKind kind, s32 meta_index,
 
 static void build_content_choices(void) {
     g.choice_count = 0;
-    s32 base = -1;
-    s32 update = -1;
+    /* The same entries the export routes use: installed, newest version.
+       An update NS still lists without storage cannot be read, so it must
+       not turn the game into "Base + installed update". */
+    const NsApplicationContentMetaStatus *base_status =
+        find_program_status(NcmContentMetaType_Application);
+    const NsApplicationContentMetaStatus *update_status =
+        find_program_status(NcmContentMetaType_Patch);
+    s32 base = base_status ? (s32)(base_status - g.meta) : -1;
+    s32 update = update_status ? (s32)(update_status - g.meta) : -1;
+    for (s32 i = 0; i < g.meta_count && base < 0; ++i) {
+        /* Keep a base NS lists without storage as before: the export
+           routes still look it up through NCM. */
+        if (g.meta[i].meta_type == NcmContentMetaType_Application) base = i;
+    }
     for (s32 i = 0; i < g.meta_count; ++i) {
-        if (g.meta[i].meta_type == NcmContentMetaType_Application)
-            base = i;
-        else if (g.meta[i].meta_type == NcmContentMetaType_Patch)
-            update = i;
+        if (g.meta[i].meta_type == NcmContentMetaType_Patch &&
+            &g.meta[i] != update_status)
+            log_line("content-update-ignored id=%016llX version=%u storage=%u",
+                     (unsigned long long)g.meta[i].application_id,
+                     g.meta[i].version, g.meta[i].storageID);
     }
 
     bool game_card = base >= 0 &&
@@ -429,8 +442,8 @@ static void build_content_choices(void) {
         const NsApplicationContentMetaStatus *status = &g.meta[i];
         if (status->meta_type == NcmContentMetaType_DataPatch) {
             /* Like a game update, a DLC update only holds changes on top of
-               its DLC and cannot be read on its own. */
-            log_line("content-dlc-update-skipped id=%016llX version=%u storage=%u",
+               its DLC: it is merged into its DLC's row, never offered alone. */
+            log_line("content-dlc-update id=%016llX version=%u storage=%u",
                      (unsigned long long)status->application_id,
                      status->version, status->storageID);
             continue;
@@ -442,7 +455,11 @@ static void build_content_choices(void) {
                      (unsigned long long)status->application_id);
             continue;
         }
-        add_content_choice(CONTENT_DLC, i, -1, false);
+        const NsApplicationContentMetaStatus *dlc_update =
+            find_dlc_update(status);
+        add_content_choice(CONTENT_DLC, i,
+                           dlc_update ? (s32)(dlc_update - g.meta) : -1,
+                           false);
     }
     log_line("content-choices count=%d base=%d update=%d game-card=%u",
              g.choice_count, base, update, game_card);

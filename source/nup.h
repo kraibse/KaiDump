@@ -69,6 +69,10 @@ typedef struct {
        type. The NPDM, build ID and provenance TLVs are added by nup. */
     const void *meta;
     size_t meta_size;
+    /* Set when the mounted content is not the version the input asked for
+       (an update that could not be opened, so the base was mounted). */
+    uint32_t version;
+    bool version_set;
 } NupMount;
 
 typedef bool (*NupCancelCallback)(void *user);
