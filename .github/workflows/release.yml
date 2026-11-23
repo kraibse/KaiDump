@@ -21,8 +21,12 @@ jobs:
 
       - name: Install devkitPro packages
         run: |
-          dkp-pacman -Sy --needed --noconfirm \
-            switch-dev switch-sdl2 switch-sdl2_ttf switch-libjpeg-turbo
+          pkgs="switch-dev switch-sdl2 switch-sdl2_ttf switch-libjpeg-turbo"
+          # pkg.devkitpro.org rejects CI downloads (HTTP 403); the
+          # devkita64 image already ships these, so only sync if missing.
+          if ! dkp-pacman -Q $pkgs; then
+            dkp-pacman -Sy --needed --noconfirm $pkgs
+          fi
 
       - name: Install ounce-devkit
         run: |
