@@ -27,7 +27,9 @@
 #include "virtual_file.h"
 #include "virtual_tree.h"
 
-#define KAIDUMP_VERSION "1.0.5"
+#ifndef KAIDUMP_VERSION /* set from APP_VERSION by the Makefile */
+#define KAIDUMP_VERSION "dev"
+#endif
 #define MAX_APPLICATIONS 512
 #define MAX_META_STATUS 64
 #define ROWS_PER_PAGE 10
