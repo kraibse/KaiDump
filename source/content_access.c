@@ -1283,9 +1283,10 @@ static Result mount_native_title_romfs(u64 application_id,
     if (R_FAILED(result)) return result;
 
     /* Ordinary titles already have a working system location. This route is
-     * specifically for hybrid titles whose selected Program has a native
-     * runtime ID and a non-zero program index. */
-    if (runtime_program_id == application_id || !program_index)
+     * for Programs with their own runtime ID: a Switch 2 Edition's native
+     * Program (index >= 1), or a Switch 1 game whose update swaps in a
+     * native Program at index 0. */
+    if (runtime_program_id == application_id)
         return MAKERESULT(Module_Libnx, LibnxError_NotFound);
 
     result = begin_temporary_program_location(
