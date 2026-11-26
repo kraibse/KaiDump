@@ -28,7 +28,7 @@ LIBS     := -L$(DEVKITPRO)/portlibs/switch2/lib -L$(DEVKITPRO)/libounce/lib \
             -Wl,--end-group
 
 APP_SOURCES := main.c app.c catalog.c screens.c content_access.c \
-               content_export.c export.c source_io.c \
+               content_export.c export.c program_select.c source_io.c \
                ui.c nup.c tar.c ftp.c virtual_file.c virtual_tree.c
 MTP_SOURCES := mtp/dataset.c mtp/mtp.c mtp/objdb.c mtp/status.c \
                mtp/usb_transport.c

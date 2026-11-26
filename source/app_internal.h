@@ -19,6 +19,7 @@
 #include "ftp.h"
 #include "mtp.h"
 #include "nup.h"
+#include "program_select.h"
 #include "source_io.h"
 #include "status.h"
 #include "tar.h"
@@ -150,6 +151,9 @@ typedef struct {
     bool romfs_self_matched;
     /* A selected DLC has an installed update that could not be merged. */
     bool dlc_update_missing;
+    /* Programs available on the selected game/base status (Switch 2 Editions). */
+    GameProgramList nup_programs;
+    u8 nup_program_index;
 } AppState;
 
 extern AppState g;
@@ -182,6 +186,7 @@ void load_visible_metadata(void);
 const char *storage_name(u8 id);
 void load_grid_icons(void);
 void load_details(void);
+void refresh_nup_programs(void);
 Result load_control_from_content(Application *app);
 void title_from_nacp(Application *app, NacpStruct *nacp);
 
@@ -216,6 +221,11 @@ Result mount_title_romfs(u64 application_id, bool *romfs_device);
 /* The base RomFS without the update (sets g.romfs_base_only when an update
    is installed), so it matches a base ExeFS. */
 Result mount_base_title_romfs(u64 application_id, bool *romfs_device);
+/* Mounts a multi-program base status's RomFS (e.g. a Switch 2 Edition game
+   card's native program1) without pulling in a separately installed update. */
+Result mount_base_program_romfs(u64 application_id,
+                                const NsApplicationContentMetaStatus *status,
+                                bool *romfs_device);
 /* Keeps the more informative of two RomFS open failures (e.g. a missing
    update key over a generic InvalidArgument from a later fallback). */
 Result prefer_romfs_failure(Result kept, Result candidate);
@@ -230,9 +240,12 @@ Result open_patched_addon_storage(const NsApplicationContentMetaStatus *dlc,
                                   const NsApplicationContentMetaStatus *patch,
                                   FsStorage *out);
 /* Programs of titles with more than one (Switch 2 Editions). */
-#define PROGRAM_INDEX_AUTO 0xff
 void set_program_index_override(int program_index);
+s32 content_program_indices(const NsApplicationContentMetaStatus *status,
+                            u8 *out, s32 capacity);
 s32 game_program_indices(u8 *out, s32 capacity);
+void load_status_programs(const NsApplicationContentMetaStatus *status,
+                          GameProgramList *out);
 /* Serialized NUP application meta TLVs (name, icon, ...) for the selected
    title; include_version adds the NACP and display version. */
 bool build_nup_app_meta(bool include_version, uint8_t **out_meta,

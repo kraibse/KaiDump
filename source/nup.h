@@ -36,6 +36,7 @@ enum {
     NUP_LAYOUT_UPDATE,
     NUP_LAYOUT_DLC,
     NUP_LAYOUT_GAME_PROGRAM,
+    NUP_LAYOUT_BASE_PROGRAM,
 };
 
 typedef struct {
