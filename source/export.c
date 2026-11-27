@@ -210,13 +210,11 @@ static bool select_app_meta(const ContentChoice *choice, bool base_only,
     return *meta != NULL;
 }
 
-static void attach_nup_meta(const NupInput *input, const ContentChoice *choice,
-                            bool base_only, NupMount *mount) {
-    /* A NUP carries one game: extra programs are not packed (see
-       build_nup_inputs), and extracted output gets the files per program. */
-    if (g.output_format == OUTPUT_NUP &&
-        input->program_index != PROGRAM_INDEX_AUTO && input->program_index)
-        return;
+static void attach_nup_meta(const ContentChoice *choice, bool base_only,
+                            NupMount *mount) {
+    /* A NUP packs one game/base package (whichever program was selected), so
+       it always carries the application metadata TLVs; extracted/TAR output
+       also gets control files per program. */
     const uint8_t *meta = NULL;
     size_t meta_size = 0;
     if (select_app_meta(choice, base_only, &meta, &meta_size)) {
@@ -268,14 +266,23 @@ static void write_selected_control_files(const char *root,
     if (choice->kind == CONTENT_BASE) {
         snprintf(package, sizeof(package), "%s/base", root);
         write_control_files(package, choice, base_only);
+        u8 programs[MAX_GAME_PROGRAMS] = {0};
+        s32 program_count = content_program_indices(
+            &g.meta[choice->meta_index], programs, MAX_GAME_PROGRAMS);
+        for (s32 i = 0; i < program_count; ++i) {
+            if (!programs[i]) continue;
+            snprintf(package, sizeof(package), "%s/base/program%u", root,
+                     programs[i]);
+            write_control_files(package, choice, base_only);
+        }
         return;
     }
     if (choice->kind != CONTENT_GAME) return;
     snprintf(package, sizeof(package), "%s/game", root);
     write_control_files(package, choice, base_only);
     /* Switch 2 Editions: every program shares the application's control. */
-    u8 programs[8] = {0};
-    s32 program_count = game_program_indices(programs, 8);
+    u8 programs[MAX_GAME_PROGRAMS] = {0};
+    s32 program_count = game_program_indices(programs, MAX_GAME_PROGRAMS);
     for (s32 i = 0; i < program_count; ++i) {
         if (!programs[i]) continue;
         snprintf(package, sizeof(package), "%s/game/program%u", root,
@@ -340,15 +347,45 @@ static Result mount_nup_source(const NupInput *input, NupMount *mount,
             }
         }
         set_program_index_override(-1);
-    } else {
-        if (choice->kind == CONTENT_BASE) {
-            result = mount_nup_exefs_status(
-                status, NULL,
-                g.applications[g.selected].record.application_id, context);
+    } else if (choice->kind == CONTENT_BASE) {
+        set_program_index_override(
+            input->program_index == PROGRAM_INDEX_AUTO
+                ? -1 : input->program_index);
+        const u64 application_id =
+            g.applications[g.selected].record.application_id;
+        result = mount_nup_exefs_status(status, NULL, application_id, context);
+        if (R_SUCCEEDED(result)) {
+            bool romfs_device = false;
+            if (input->program_index != PROGRAM_INDEX_AUTO &&
+                input->program_index > 0) {
+                result = mount_base_program_romfs(
+                    application_id, status, &romfs_device);
+                if (R_SUCCEEDED(result)) {
+                    context->romfs_active = true;
+                    context->romfs_device = romfs_device;
+                    context->romfs_combined_name = true;
+                    snprintf(mount->romfs, sizeof(mount->romfs), "kdrom:/");
+                } else if (result ==
+                           MAKERESULT(Module_Libnx, LibnxError_NotFound)) {
+                    const NsApplicationContentMetaStatus *merged_update = NULL;
+                    result = mount_nup_romfs_status(
+                        status, context, &merged_update);
+                    if (R_SUCCEEDED(result))
+                        snprintf(mount->romfs, sizeof(mount->romfs),
+                                 "kdnrom:/");
+                }
+            } else {
+                const NsApplicationContentMetaStatus *merged_update = NULL;
+                result = mount_nup_romfs_status(
+                    status, context, &merged_update);
+                if (R_SUCCEEDED(result))
+                    snprintf(mount->romfs, sizeof(mount->romfs), "kdnrom:/");
+            }
         }
+        set_program_index_override(-1);
+    } else {
         const NsApplicationContentMetaStatus *merged_update = NULL;
-        if (R_SUCCEEDED(result))
-            result = mount_nup_romfs_status(status, context, &merged_update);
+        result = mount_nup_romfs_status(status, context, &merged_update);
         if (R_SUCCEEDED(result))
             snprintf(mount->romfs, sizeof(mount->romfs), "kdnrom:/");
         if (R_SUCCEEDED(result) && merged_update) {
@@ -359,7 +396,7 @@ static Result mount_nup_source(const NupInput *input, NupMount *mount,
     }
     if (R_SUCCEEDED(result) && context->exefs_active)
         snprintf(mount->exefs, sizeof(mount->exefs), "kdnexe:/");
-    if (R_SUCCEEDED(result)) attach_nup_meta(input, choice, base_only, mount);
+    if (R_SUCCEEDED(result)) attach_nup_meta(choice, base_only, mount);
     if (R_SUCCEEDED(result) && base_only && choice->update_index >= 0) {
         /* The package holds the base game, not the update's version. */
         mount->version = g.meta[choice->meta_index].version;
@@ -445,39 +482,50 @@ static size_t build_nup_inputs(NupInput *inputs, size_t capacity) {
         memset(input, 0, sizeof(*input));
         input->source_id = (u32)i;
         input->program_index = PROGRAM_INDEX_AUTO;
-        if (choice->kind == CONTENT_GAME) {
-            input->title_id = app->record.application_id;
-            input->version = choice->update_index >= 0
-                ? g.meta[choice->update_index].version : meta->version;
-            input->kind = NUP_KIND_BASE;
-            input->layout = NUP_LAYOUT_GAME;
+        if (choice->kind == CONTENT_GAME || choice->kind == CONTENT_BASE) {
+            const bool is_game = choice->kind == CONTENT_GAME;
+            const NsApplicationContentMetaStatus *program_status =
+                is_game && choice->update_index >= 0
+                    ? &g.meta[choice->update_index] : meta;
+            const u64 default_title_id = is_game
+                ? app->record.application_id : meta->application_id;
+            const u32 version = program_status->version;
+            const u8 base_layout = is_game
+                ? NUP_LAYOUT_GAME : NUP_LAYOUT_BASE;
+            const u8 extra_layout = is_game
+                ? NUP_LAYOUT_GAME_PROGRAM : NUP_LAYOUT_BASE_PROGRAM;
 
-            /* Switch 2 Editions: the original game (program 0) goes in
-               game/, every other program in game/program<N>/. */
-            u8 programs[8] = {0};
-            s32 program_count = game_program_indices(programs, 8);
-            if (program_count > 1) {
-                const NupInput game = *input;
-                for (s32 p = 0; p < program_count && count < capacity; ++p) {
-                    if (programs[p] && g.output_format == OUTPUT_NUP) {
-                        /* The NUP format has no program index yet. */
-                        log_line("nup-input-skip-program index=%u",
-                                 programs[p]);
-                        continue;
-                    }
-                    inputs[count] = game;
-                    inputs[count].program_index = programs[p];
-                    inputs[count].layout = programs[p]
-                        ? NUP_LAYOUT_GAME_PROGRAM : NUP_LAYOUT_GAME;
-                    ++count;
-                }
-                continue;
+            GameProgramList programs;
+            load_status_programs(program_status, &programs);
+
+            ProgramPlanInput planned[MAX_GAME_PROGRAMS];
+            size_t max_planned = capacity - count;
+            if (max_planned > MAX_GAME_PROGRAMS)
+                max_planned = MAX_GAME_PROGRAMS;
+            u8 chosen_program = PROGRAM_INDEX_AUTO;
+            size_t planned_count = plan_program_inputs(
+                planned, max_planned, (u32)i, default_title_id, version,
+                NUP_KIND_BASE, base_layout, extra_layout,
+                g.output_format == OUTPUT_NUP, &programs,
+                g.nup_program_index, &chosen_program);
+            if (g.output_format == OUTPUT_NUP && programs.count > 1 &&
+                planned_count) {
+                log_line("nup-input-select-program kind=%s index=%u title=%016llX count=%d",
+                         is_game ? "game" : "base", chosen_program,
+                         (unsigned long long)planned[0].title_id,
+                         programs.count);
             }
-        } else if (choice->kind == CONTENT_BASE) {
-            input->title_id = meta->application_id;
-            input->version = meta->version;
-            input->kind = NUP_KIND_BASE;
-            input->layout = NUP_LAYOUT_BASE;
+            for (size_t p = 0; p < planned_count && count < capacity; ++p) {
+                NupInput *slot = &inputs[count++];
+                memset(slot, 0, sizeof(*slot));
+                slot->title_id = planned[p].title_id;
+                slot->version = planned[p].version;
+                slot->source_id = planned[p].source_id;
+                slot->kind = planned[p].kind;
+                slot->layout = planned[p].layout;
+                slot->program_index = planned[p].program_index;
+            }
+            continue;
         } else {
             input->title_id = meta->application_id;
             input->version = meta->version;
@@ -916,8 +964,7 @@ static Result serve_selected_tar_usb(PadState *pad) {
 }
 
 static bool is_switch2_title(u64 application_id) {
-    return (application_id & 0xffff000000000000ULL) ==
-           0x0400000000000000ULL;
+    return is_switch2_program_id(application_id);
 }
 
 void dump_title(PadState *pad) {

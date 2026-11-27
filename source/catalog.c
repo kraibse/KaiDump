@@ -592,6 +592,45 @@ static void resolve_game_card_meta(void) {
     ncmExit();
 }
 
+void refresh_nup_programs(void) {
+    memset(&g.nup_programs, 0, sizeof(g.nup_programs));
+    g.nup_programs.platform = PROGRAM_PLATFORM_UNKNOWN;
+    if (g.count <= 0) {
+        g.nup_program_index = PROGRAM_INDEX_AUTO;
+        return;
+    }
+
+    const NsApplicationContentMetaStatus *target = NULL;
+    for (s32 i = 0; i < g.choice_count; ++i) {
+        const ContentChoice *choice = &g.choices[i];
+        if (!choice->selected) continue;
+        if (choice->kind == CONTENT_GAME) {
+            s32 index = choice->update_index >= 0
+                ? choice->update_index : choice->meta_index;
+            target = &g.meta[index];
+            break;
+        }
+        if (choice->kind == CONTENT_BASE && !target)
+            target = &g.meta[choice->meta_index];
+    }
+    if (!target) {
+        g.nup_program_index = PROGRAM_INDEX_AUTO;
+        return;
+    }
+
+    load_status_programs(target, &g.nup_programs);
+    const u64 app_id = g.applications[g.selected].record.application_id;
+    int slot = resolve_nup_program_slot(&g.nup_programs, app_id,
+                                        g.nup_program_index);
+    g.nup_program_index = slot >= 0
+        ? g.nup_programs.indices[slot] : PROGRAM_INDEX_AUTO;
+    if (g.nup_programs.count > 1) {
+        log_line("nup-programs-ready title=%016llX count=%d platform=%u selected=%u",
+                 (unsigned long long)app_id, g.nup_programs.count,
+                 g.nup_programs.platform, g.nup_program_index);
+    }
+}
+
 void load_details(void) {
     if (g.count <= 0) return;
     Application *app = &g.applications[g.selected];
@@ -622,6 +661,8 @@ void load_details(void) {
              g.control_icon_size);
     g.content_cursor = 0;
     build_content_choices();
+    g.nup_program_index = PROGRAM_INDEX_AUTO;
+    refresh_nup_programs();
     load_selected_icon(app);
     g.screen = SCREEN_DETAILS;
     log_line("details title=%016llX result=0x%08x count=%d",

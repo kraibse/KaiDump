@@ -869,6 +869,9 @@ static Result build_tree(NupArchive *archive) {
                      input->program_index);
         else if (layout == NUP_LAYOUT_BASE)
             snprintf(prefix, sizeof(prefix), "base");
+        else if (layout == NUP_LAYOUT_BASE_PROGRAM)
+            snprintf(prefix, sizeof(prefix), "base/program%u",
+                     input->program_index);
         else if (layout == NUP_LAYOUT_UPDATE)
             snprintf(prefix, sizeof(prefix), "updates/%u", input->version);
         else
@@ -880,7 +883,8 @@ static Result build_tree(NupArchive *archive) {
                 archive, archive->plan.packages[i].root_dir, prefix);
         if (R_SUCCEEDED(result) && (layout == NUP_LAYOUT_GAME ||
                                     layout == NUP_LAYOUT_GAME_PROGRAM ||
-                                    layout == NUP_LAYOUT_BASE))
+                                    layout == NUP_LAYOUT_BASE ||
+                                    layout == NUP_LAYOUT_BASE_PROGRAM))
             result = tree_add_control_files(
                 archive, &archive->plan.packages[i], prefix);
     }

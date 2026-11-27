@@ -1219,8 +1219,8 @@ static bool result_is_missing_external_key(Result result) {
     return (result & 0x3fffff) == 0x7d802;
 }
 
-static s32 list_program_indices(const NsApplicationContentMetaStatus *status,
-                                u8 *out, s32 capacity) {
+s32 content_program_indices(const NsApplicationContentMetaStatus *status,
+                            u8 *out, s32 capacity) {
     if (!status || capacity <= 0) return 0;
     Result result = ncmInitialize();
     if (R_FAILED(result)) return 0;
@@ -1262,9 +1262,80 @@ static s32 list_program_indices(const NsApplicationContentMetaStatus *status,
 s32 game_program_indices(u8 *out, s32 capacity) {
     const NsApplicationContentMetaStatus *update =
         find_program_status(NcmContentMetaType_Patch);
-    return list_program_indices(
+    return content_program_indices(
         update ? update : find_program_status(NcmContentMetaType_Application),
         out, capacity);
+}
+
+void load_status_programs(const NsApplicationContentMetaStatus *status,
+                          GameProgramList *out) {
+    memset(out, 0, sizeof(*out));
+    out->platform = PROGRAM_PLATFORM_UNKNOWN;
+    if (!status || status->storageID == NcmStorageId_None) return;
+
+    Result result = ncmInitialize();
+    if (R_FAILED(result)) return;
+
+    NcmContentMetaKey key = {
+        .id = status->application_id,
+        .version = status->version,
+        .type = status->meta_type,
+        .install_type = NcmContentInstallType_Full,
+    };
+    NcmContentId content_ids[MAX_GAME_PROGRAMS] = {0};
+    u8 attrs[MAX_GAME_PROGRAMS] = {0};
+    NcmContentMetaDatabase database = {0};
+    result = ncmOpenContentMetaDatabase(&database, status->storageID);
+    if (R_SUCCEEDED(result)) {
+        u8 platform = PROGRAM_PLATFORM_UNKNOWN;
+        if (R_SUCCEEDED(ncmContentMetaDatabaseGetPlatform(
+                &database, &platform, &key)))
+            out->platform = platform;
+
+        NcmContentInfo infos[32] = {0};
+        s32 written = 0;
+        result = ncmContentMetaDatabaseListContentInfo(
+            &database, &written, infos, 32, &key, 0);
+        for (s32 i = 0; R_SUCCEEDED(result) && i < written; ++i) {
+            if (infos[i].content_type != NcmContentType_Program) continue;
+            const u8 index = infos[i].id_offset;
+            int at = 0;
+            while (at < out->count && out->indices[at] < index) ++at;
+            if (at < out->count && out->indices[at] == index) continue;
+            if (out->count >= MAX_GAME_PROGRAMS) break;
+            for (int j = out->count; j > at; --j) {
+                out->indices[j] = out->indices[j - 1];
+                content_ids[j] = content_ids[j - 1];
+                attrs[j] = attrs[j - 1];
+            }
+            out->indices[at] = index;
+            content_ids[at] = infos[i].content_id;
+            attrs[at] = infos[i].attr & 0x0f;
+            ++out->count;
+        }
+        ncmContentMetaDatabaseClose(&database);
+    }
+
+    if (R_SUCCEEDED(result) && out->count > 1) {
+        NcmContentStorage storage = {0};
+        if (R_SUCCEEDED(ncmOpenContentStorage(&storage, status->storageID))) {
+            for (int i = 0; i < out->count; ++i) {
+                u64 runtime_id = 0;
+                Result id_result = ncmContentStorageGetProgramId(
+                    &storage, &runtime_id, &content_ids[i],
+                    (FsContentAttributes)attrs[i]);
+                if (R_SUCCEEDED(id_result)) out->runtime_ids[i] = runtime_id;
+                log_line("program-info id=%016llX type=%u index=%u runtime=%016llX result=0x%08x",
+                         (unsigned long long)status->application_id,
+                         status->meta_type, out->indices[i],
+                         (unsigned long long)out->runtime_ids[i], id_result);
+            }
+            ncmContentStorageClose(&storage);
+        }
+    } else if (R_FAILED(result)) {
+        out->count = 0;
+    }
+    ncmExit();
 }
 
 typedef struct {
@@ -1412,15 +1483,12 @@ static void end_native_romfs_context(void) {
     g_romfs_native_context_active = false;
 }
 
-static Result mount_native_title_romfs(u64 application_id,
-                                       bool *romfs_device) {
+static Result mount_native_status_romfs(
+    u64 application_id, const NsApplicationContentMetaStatus *selected,
+    const NsApplicationContentMetaStatus *base, bool allow_patch,
+    bool *romfs_device) {
     end_native_romfs_context();
 
-    const NsApplicationContentMetaStatus *base =
-        find_program_status(NcmContentMetaType_Application);
-    const NsApplicationContentMetaStatus *update =
-        find_program_status(NcmContentMetaType_Patch);
-    const NsApplicationContentMetaStatus *selected = update ? update : base;
     if (!selected)
         return MAKERESULT(Module_Libnx, LibnxError_NotFound);
 
@@ -1459,28 +1527,34 @@ static Result mount_native_title_romfs(u64 application_id,
     }
 
     FsFileSystem filesystem = {0};
-    result = fsOpenFileSystemWithPatch(
-        &filesystem, runtime_program_id, (FsFileSystemType)1);
-    log_line("romfs-native-open-patch runtime=%016llX result=0x%08x",
-             (unsigned long long)runtime_program_id, result);
-    if (R_FAILED(result) && selected == update && base) {
-        /* The fallbacks below open the selected Program on its own. When the
-           base has this Program too, the update's is only the delta on top
-           of it: it can mount, but every file that comes from the base fails
-           to read. A Program the update adds (a Switch 2 Edition's native
-           program) is complete, so it may still be opened alone. */
-        u8 base_programs[8] = {0};
-        const s32 base_count = list_program_indices(base, base_programs, 8);
-        bool base_has_program = false;
-        for (s32 i = 0; i < base_count; ++i)
-            if (base_programs[i] == program_index) base_has_program = true;
-        log_line("romfs-native-update-program index=%u base-has-program=%u",
-                 program_index, base_has_program);
-        if (base_has_program) {
-            log_line("romfs-native-skip-update-only reason=update-romfs-needs-base");
-            end_native_romfs_context();
-            return result;
+    if (allow_patch) {
+        result = fsOpenFileSystemWithPatch(
+            &filesystem, runtime_program_id, (FsFileSystemType)1);
+        log_line("romfs-native-open-patch runtime=%016llX result=0x%08x",
+                 (unsigned long long)runtime_program_id, result);
+        if (R_FAILED(result) && base) {
+            /* The fallbacks below open the selected Program on its own. When
+               the base has this Program too, the update's is only the delta
+               on top of it: it can mount, but every file that comes from the
+               base fails to read. A Program the update adds (a Switch 2
+               Edition's native program) is complete, so it may still be
+               opened alone. */
+            u8 base_programs[MAX_GAME_PROGRAMS] = {0};
+            const s32 base_count = content_program_indices(
+                base, base_programs, MAX_GAME_PROGRAMS);
+            bool base_has_program = false;
+            for (s32 i = 0; i < base_count; ++i)
+                if (base_programs[i] == program_index) base_has_program = true;
+            log_line("romfs-native-update-program index=%u base-has-program=%u",
+                     program_index, base_has_program);
+            if (base_has_program) {
+                log_line("romfs-native-skip-update-only reason=update-romfs-needs-base");
+                end_native_romfs_context();
+                return result;
+            }
         }
+    } else {
+        result = MAKERESULT(Module_Libnx, LibnxError_NotFound);
     }
     if (R_FAILED(result)) {
         result = fsOpenFileSystemWithId(
@@ -1518,6 +1592,27 @@ static Result mount_native_title_romfs(u64 application_id,
 
     end_native_romfs_context();
     return R_FAILED(result) ? result : storage_result;
+}
+
+static Result mount_native_title_romfs(u64 application_id,
+                                       bool *romfs_device) {
+    const NsApplicationContentMetaStatus *base =
+        find_program_status(NcmContentMetaType_Application);
+    const NsApplicationContentMetaStatus *update =
+        find_program_status(NcmContentMetaType_Patch);
+    const NsApplicationContentMetaStatus *selected = update ? update : base;
+    return mount_native_status_romfs(
+        application_id, selected, selected == update ? base : NULL,
+        true, romfs_device);
+}
+
+Result mount_base_program_romfs(u64 application_id,
+                                const NsApplicationContentMetaStatus *status,
+                                bool *romfs_device) {
+    if (!find_program_status(NcmContentMetaType_Patch))
+        return mount_title_romfs(application_id, romfs_device);
+    return mount_native_status_romfs(
+        application_id, status, NULL, false, romfs_device);
 }
 
 /* When KaiDump is launched through the selected game, this session lets FS
@@ -1626,8 +1721,9 @@ static Result mount_self_title_romfs(u64 application_id,
         matches = true;
         own_index = wanted_index;
     } else if (process_program_id && selected) {
-        u8 indices[8] = {0};
-        s32 count = list_program_indices(selected, indices, 8);
+        u8 indices[MAX_GAME_PROGRAMS] = {0};
+        s32 count = content_program_indices(selected, indices,
+                                            MAX_GAME_PROGRAMS);
         for (s32 i = 0; i < count && !matches; ++i) {
             if (program_runtime_id(selected, indices[i], NULL) !=
                 process_program_id)

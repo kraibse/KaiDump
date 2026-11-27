@@ -402,8 +402,20 @@ static const char *output_format_short_name(void) {
     }
 }
 
+static bool nup_program_selector_visible(void) {
+    return g.output_format == OUTPUT_NUP && g.nup_programs.count > 1;
+}
+
+static int current_nup_program_slot(void) {
+    if (g.count <= 0) return -1;
+    return resolve_nup_program_slot(
+        &g.nup_programs, g.applications[g.selected].record.application_id,
+        g.nup_program_index);
+}
+
 static void draw_output(void) {
     Application *app = &g.applications[g.selected];
+    const bool show_program = nup_program_selector_visible();
     const char *destination = g.usb_enabled ? "USB" : g.ftp_enabled ? "FTP" : "SD card";
     const char *destination_description;
     if (g.usb_enabled) {
@@ -443,15 +455,34 @@ static void draw_output(void) {
                     g.output_cursor == 1,
                     ftp_unavailable ? COLOR_ERROR : 0,
                     ftp_unavailable ? COLOR_ERROR : 0);
+    if (show_program) {
+        int slot = current_nup_program_slot();
+        char program_label[64];
+        char program_description[128];
+        format_nup_program_label(&g.nup_programs, slot, program_label,
+                                 sizeof(program_label));
+        const u64 runtime_id = slot >= 0
+            ? g.nup_programs.runtime_ids[slot] : 0;
+        if (runtime_id)
+            snprintf(program_description, sizeof(program_description),
+                     "NUP packs one program (%016llX).",
+                     (unsigned long long)runtime_id);
+        else
+            snprintf(program_description, sizeof(program_description),
+                     "NUP packs one program; choose which edition to export.");
+        draw_option_row(470, "Program", program_label, program_description,
+                        g.output_cursor == 2, 0, 0);
+    }
+    const int hint_y = show_program ? 574 : 482;
     if (g.output_format == OUTPUT_NUP && (g.ftp_enabled || g.usb_enabled))
-        uiDrawText(278, 482, 15, COLOR_MUTED,
+        uiDrawText(278, hint_y, 15, COLOR_MUTED,
                    "Virtual output requires one hashing pass before transfer begins.");
     else if (g.output_format == OUTPUT_TAR && (g.ftp_enabled || g.usb_enabled))
-        uiDrawText(278, 482, 15, COLOR_MUTED,
+        uiDrawText(278, hint_y, 15, COLOR_MUTED,
                    "TAR is available after a quick file inventory; no hash pass needed.");
     else if (g.output_format == OUTPUT_EXTRACTED &&
              (g.ftp_enabled || g.usb_enabled))
-        uiDrawText(278, 482, 15, COLOR_MUTED,
+        uiDrawText(278, hint_y, 15, COLOR_MUTED,
                    "Files are read directly from the selected game content.");
 
     draw_footer("D-Pad", "Select", "A / Left / Right", "Change",
@@ -470,9 +501,19 @@ static void draw_confirm(void) {
     uiDrawTextEllipsized(330, 201, 18, COLOR_MUTED,
                          app->title[0] ? app->title : "Title unavailable", 680);
 
-    uiDrawTextf(250, 256, 16, COLOR_SUBTLE,
-                "CONTENT  /  %d SELECTED  /  %s",
-                selected_content_count(), output_format_short_name());
+    if (nup_program_selector_visible()) {
+        char program_label[64];
+        format_nup_program_label(&g.nup_programs, current_nup_program_slot(),
+                                 program_label, sizeof(program_label));
+        uiDrawTextf(250, 256, 16, COLOR_SUBTLE,
+                    "CONTENT  /  %d SELECTED  /  %s  /  %s",
+                    selected_content_count(), output_format_short_name(),
+                    program_label);
+    } else {
+        uiDrawTextf(250, 256, 16, COLOR_SUBTLE,
+                    "CONTENT  /  %d SELECTED  /  %s",
+                    selected_content_count(), output_format_short_name());
+    }
     uiDrawText(250, 286, 16, COLOR_SUBTLE, "DESTINATION");
     uiFillRoundedRect(250, 314, 780, 58, 9, COLOR_BACKGROUND);
     char output_name[256];
@@ -850,6 +891,7 @@ bool handle_input(u64 down, PadState *pad) {
                 !g.choices[g.content_cursor].selected;
         } else if ((down & HidNpadButton_X) && selected_content_count() > 0) {
             g.output_cursor = 0;
+            refresh_nup_programs();
             refresh_ftp_availability();
             g.screen = SCREEN_OUTPUT;
         } else if (g.choice_count > 0) {
@@ -866,6 +908,8 @@ bool handle_input(u64 down, PadState *pad) {
             return true;
         }
     } else if (g.screen == SCREEN_OUTPUT) {
+        const s32 max_cursor = nup_program_selector_visible() ? 2 : 1;
+        if (g.output_cursor > max_cursor) g.output_cursor = max_cursor;
         if (down & HidNpadButton_B) {
             g.screen = SCREEN_DETAILS;
         } else if (down & HidNpadButton_X) {
@@ -876,9 +920,9 @@ bool handle_input(u64 down, PadState *pad) {
                 g.screen = SCREEN_CONFIRM;
             }
         } else if (down & HidNpadButton_AnyUp) {
-            g.output_cursor = 0;
+            if (g.output_cursor > 0) --g.output_cursor;
         } else if (down & HidNpadButton_AnyDown) {
-            g.output_cursor = 1;
+            if (g.output_cursor < max_cursor) ++g.output_cursor;
         } else if (down & (HidNpadButton_A | HidNpadButton_AnyLeft |
                            HidNpadButton_AnyRight)) {
             if (g.output_cursor == 0) {
@@ -887,7 +931,9 @@ bool handle_input(u64 down, PadState *pad) {
                                       OUTPUT_FORMAT_COUNT;
                 else
                     g.output_format = (g.output_format + 1) % OUTPUT_FORMAT_COUNT;
-            } else {
+                if (!nup_program_selector_visible() && g.output_cursor > 1)
+                    g.output_cursor = 1;
+            } else if (g.output_cursor == 1) {
                 if (!g.ftp_enabled && !g.usb_enabled) {
                     refresh_ftp_availability();
                     g.ftp_enabled = true;
@@ -897,6 +943,15 @@ bool handle_input(u64 down, PadState *pad) {
                 } else {
                     g.usb_enabled = false;
                 }
+            } else if (g.output_cursor == 2 && nup_program_selector_visible()) {
+                int slot = current_nup_program_slot();
+                if (slot < 0) slot = 0;
+                if (down & HidNpadButton_AnyLeft)
+                    slot = (slot + g.nup_programs.count - 1) %
+                           g.nup_programs.count;
+                else
+                    slot = (slot + 1) % g.nup_programs.count;
+                g.nup_program_index = g.nup_programs.indices[slot];
             }
         } else return true;
     } else if (g.screen == SCREEN_CONFIRM) {

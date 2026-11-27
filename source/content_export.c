@@ -232,7 +232,22 @@ static Result copy_selected_exefs(
 
 static Result copy_selected_romfs(
     const NsApplicationContentMetaStatus *status, const char *destination,
-    PadState *pad) {
+    u8 program_index, PadState *pad) {
+    if (status->meta_type == NcmContentMetaType_Application &&
+        program_index != PROGRAM_INDEX_AUTO && program_index > 0) {
+        bool romfs_device = false;
+        Result native_result = mount_base_program_romfs(
+            g.applications[g.selected].record.application_id,
+            status, &romfs_device);
+        if (R_SUCCEEDED(native_result)) {
+            Result copy_result = copy_tree("kdrom:/", destination, "romfs",
+                                           pad);
+            unmount_title_romfs("kdrom", romfs_device);
+            return copy_result;
+        }
+        if (native_result != MAKERESULT(Module_Libnx, LibnxError_NotFound))
+            return native_result;
+    }
     bool addon = status->meta_type == NcmContentMetaType_AddOnContent ||
                  status->meta_type == NcmContentMetaType_DataPatch;
     u8 content_type = addon ? NcmContentType_Data : NcmContentType_Program;
@@ -308,20 +323,9 @@ static Result copy_selected_romfs(
     return prefer_romfs_failure(storage_failure, result);
 }
 
-Result export_selected_content(
-    const NsApplicationContentMetaStatus *status, const char *root,
-    PadState *pad) {
-    char package[512];
-    if (status->meta_type == NcmContentMetaType_Application) {
-        snprintf(package, sizeof(package), "%s/base", root);
-    } else if (status->meta_type == NcmContentMetaType_AddOnContent ||
-               status->meta_type == NcmContentMetaType_DataPatch) {
-        snprintf(package, sizeof(package), "%s/dlc/%016llX/0", root,
-                 (unsigned long long)status->application_id);
-    } else {
-        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
-    }
-
+static Result export_selected_package(
+    const NsApplicationContentMetaStatus *status, const char *package,
+    u8 program_index, PadState *pad) {
     Result exefs_result = 0;
     if (status->meta_type == NcmContentMetaType_Application) {
         char destination[576];
@@ -335,13 +339,51 @@ Result export_selected_content(
     if (!cancelled) {
         char destination[576];
         snprintf(destination, sizeof(destination), "%s/romfs", package);
-        romfs_result = copy_selected_romfs(status, destination, pad);
+        romfs_result = copy_selected_romfs(status, destination,
+                                           program_index, pad);
     }
     Result result = R_FAILED(exefs_result) ? exefs_result : romfs_result;
-    log_line("selected-content-finish id=%016llX type=%u version=%u exefs=0x%08x romfs=0x%08x result=0x%08x",
+    log_line("selected-content-finish id=%016llX type=%u version=%u program=%u exefs=0x%08x romfs=0x%08x result=0x%08x",
              (unsigned long long)status->application_id, status->meta_type,
-             status->version, exefs_result, romfs_result, result);
+             status->version, program_index, exefs_result, romfs_result,
+             result);
     return result;
+}
+
+Result export_selected_content(
+    const NsApplicationContentMetaStatus *status, const char *root,
+    PadState *pad) {
+    char package[512];
+    if (status->meta_type == NcmContentMetaType_Application) {
+        u8 programs[MAX_GAME_PROGRAMS] = {0};
+        s32 program_count = content_program_indices(
+            status, programs, MAX_GAME_PROGRAMS);
+        if (program_count > 1) {
+            Result result = 0;
+            for (s32 i = 0; i < program_count && R_SUCCEEDED(result); ++i) {
+                if (programs[i])
+                    snprintf(package, sizeof(package), "%s/base/program%u",
+                             root, programs[i]);
+                else
+                    snprintf(package, sizeof(package), "%s/base", root);
+                set_program_index_override(programs[i]);
+                result = export_selected_package(status, package,
+                                                 programs[i], pad);
+                set_program_index_override(-1);
+            }
+            return result;
+        }
+        snprintf(package, sizeof(package), "%s/base", root);
+        return export_selected_package(status, package, PROGRAM_INDEX_AUTO,
+                                       pad);
+    } else if (status->meta_type == NcmContentMetaType_AddOnContent ||
+               status->meta_type == NcmContentMetaType_DataPatch) {
+        snprintf(package, sizeof(package), "%s/dlc/%016llX/0", root,
+                 (unsigned long long)status->application_id);
+        return export_selected_package(status, package, PROGRAM_INDEX_AUTO,
+                                       pad);
+    }
+    return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 }
 
 static Result export_combined_program(u64 application_id,
